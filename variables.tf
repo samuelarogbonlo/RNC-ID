@@ -1,14 +1,15 @@
+
 # Variables
 variable "project_id" {
   description = "GCP Project ID"
   type        = string
-  default     = "777310605028"
+  default     = "node-guardians"
 }
 
 variable "project_name" {
   description = "Name of the project"
   type        = string
-  default     = "cresh-test"
+  default     = "node-guardians"
 }
 
 variable "region" {
@@ -21,12 +22,6 @@ variable "container_image" {
   description = "Container image to deploy"
   type        = string
   default     = "ghcr.io/stefanprodan/podinfo:6.7.1"
-}
-
-variable "domain_name" {
-  description = "Domain name for the load balancer"
-  type        = string
-  default     = "new-service"
 }
 
 variable "db_instance_name" {
@@ -46,3 +41,10 @@ variable "db_user" {
   type        = string
   default     = "value"
 }
+
+# Outputs
+output "load_balancer_ip" {
+  value = google_compute_global_address.default.address
+}
+
+

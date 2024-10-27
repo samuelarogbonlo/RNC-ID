@@ -1,4 +1,3 @@
-
 # VPC Network
 resource "google_compute_network" "main" {
   name                    = "${var.project_name}-vpc"
@@ -36,9 +35,9 @@ resource "google_compute_router" "router" {
 # NAT configuration
 resource "google_compute_router_nat" "nat" {
   name                               = "${var.project_name}-nat"
-  router                            = google_compute_router.router.name
-  region                            = var.region
-  nat_ip_allocate_option            = "AUTO_ONLY"
+  router                             = google_compute_router.router.name
+  region                             = var.region
+  nat_ip_allocate_option             = "AUTO_ONLY"
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
@@ -50,15 +49,16 @@ resource "google_sql_database_instance" "main" {
 
   settings {
     tier = "db-f1-micro"
-    
+    edition = "ENTERPRISE" 
+
     ip_configuration {
-      ipv4_enabled       = false
-      private_network    = google_compute_network.main.id
+      ipv4_enabled    = false
+      private_network = google_compute_network.main.id
     }
 
     backup_configuration {
-      enabled            = true
-      start_time        = "02:00"
+      enabled     = true
+      start_time  = "02:00"
     }
 
     database_flags {
@@ -104,14 +104,28 @@ resource "google_secret_manager_secret" "db_credentials" {
 }
 
 resource "google_secret_manager_secret_version" "db_credentials" {
-  secret = google_secret_manager_secret.db_credentials.id
-
+  secret      = google_secret_manager_secret.db_credentials.id
   secret_data = jsonencode({
     username = google_sql_user.user.name
     password = random_password.db_password.result
     database = google_sql_database.database.name
     instance = google_sql_database_instance.main.connection_name
   })
+}
+
+# VPC Access Connector for Cloud Run
+resource "google_vpc_access_connector" "connector" {
+  name          = "${var.project_name}-connector"
+  region        = var.region
+  network       = google_compute_network.main.name
+  ip_cidr_range = "10.8.0.0/28" 
+  
+#   # Specify machine type (optional)
+#   machine_type = "e2-micro"
+  
+  # Minimum and maximum instances (optional)
+  min_instances = 2
+  max_instances = 3
 }
 
 # Cloud Run service
@@ -123,7 +137,7 @@ resource "google_cloud_run_service" "default" {
     spec {
       containers {
         image = var.container_image
-        
+
         env {
           name = "DB_USER"
           value_from {
@@ -133,7 +147,7 @@ resource "google_cloud_run_service" "default" {
             }
           }
         }
-        
+
         env {
           name = "DB_PASS"
           value_from {
@@ -171,6 +185,8 @@ resource "google_cloud_run_service" "default" {
         "autoscaling.knative.dev/maxScale"      = "10"
         "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.main.connection_name
         "run.googleapis.com/client-name"        = "terraform"
+        "run.googleapis.com/vpc-access-connector" = google_vpc_access_connector.connector.id
+        "run.googleapis.com/vpc-access-egress"    = "all-traffic"
       }
     }
   }
@@ -183,59 +199,6 @@ resource "google_cloud_run_service" "default" {
   autogenerate_revision_name = true
 }
 
-# Load Balancer
-resource "google_compute_global_address" "default" {
-  name = "${var.project_name}-lb-ip"
-}
-
-resource "google_compute_global_forwarding_rule" "default" {
-  name                  = "${var.project_name}-lb-forwarding-rule"
-  target                = google_compute_target_https_proxy.default.id
-  port_range           = "443"
-  ip_address           = google_compute_global_address.default.id
-}
-
-resource "google_compute_managed_ssl_certificate" "default" {
-  name = "${var.project_name}-ssl-cert"
-
-  managed {
-    domains = [var.domain_name]
-  }
-}
-
-resource "google_compute_target_https_proxy" "default" {
-  name             = "${var.project_name}-https-proxy"
-  url_map          = google_compute_url_map.default.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.default.id]
-}
-
-resource "google_compute_url_map" "default" {
-  name            = "${var.project_name}-url-map"
-  default_service = google_compute_backend_service.default.id
-}
-
-resource "google_compute_backend_service" "default" {
-  name                  = "${var.project_name}-backend"
-  protocol              = "HTTP"
-  port_name            = "http"
-  load_balancing_scheme = "EXTERNAL"
-  timeout_sec          = 30
-
-  backend {
-    group = google_compute_region_network_endpoint_group.cloudrun_neg.id
-  }
-}
-
-resource "google_compute_region_network_endpoint_group" "cloudrun_neg" {
-  name                  = "${var.project_name}-neg"
-  network_endpoint_type = "SERVERLESS"
-  region               = var.region
-  
-  cloud_run {
-    service = google_cloud_run_service.default.name
-  }
-}
-
 # IAM - Allow unauthenticated access to Cloud Run
 resource "google_cloud_run_service_iam_member" "public" {
   location = google_cloud_run_service.default.location
@@ -244,3 +207,51 @@ resource "google_cloud_run_service_iam_member" "public" {
   member   = "allUsers"
 }
 
+# Reserve a global IP address
+resource "google_compute_global_address" "default" {
+  name = "${var.project_name}-lb-ip"
+}
+
+# URL Map
+resource "google_compute_url_map" "default" {
+  name            = "${var.project_name}-url-map"
+  default_service = google_compute_backend_service.default.id
+}
+
+# Backend Service
+resource "google_compute_backend_service" "default" {
+  name                  = "${var.project_name}-backend"
+  protocol              = "HTTP"
+  port_name             = "http"
+  load_balancing_scheme = "EXTERNAL"
+  timeout_sec           = 30
+
+  backend {
+    group = google_compute_region_network_endpoint_group.cloudrun_neg.id
+  }
+}
+
+# Target HTTP Proxy
+resource "google_compute_target_http_proxy" "default" {
+  name    = "${var.project_name}-http-proxy"
+  url_map = google_compute_url_map.default.id
+}
+
+# Global Forwarding Rule
+resource "google_compute_global_forwarding_rule" "default" {
+  name       = "${var.project_name}-lb-forwarding-rule"
+  target     = google_compute_target_http_proxy.default.id
+  port_range = "80"
+  ip_address = google_compute_global_address.default.id
+}
+
+# Cloud Run Network Endpoint Group
+resource "google_compute_region_network_endpoint_group" "cloudrun_neg" {
+  name                  = "${var.project_name}-neg"
+  network_endpoint_type = "SERVERLESS"
+  region                = var.region
+
+  cloud_run {
+    service = google_cloud_run_service.default.name
+  }
+}
