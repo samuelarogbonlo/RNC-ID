@@ -1,4 +1,3 @@
-
 # Variables
 variable "project_id" {
   description = "GCP Project ID"
@@ -21,7 +20,7 @@ variable "region" {
 variable "container_image" {
   description = "Container image to deploy"
   type        = string
-  default     = "ghcr.io/stefanprodan/podinfo:6.7.1"
+  default     = "docker.io/nginx:latest"
 }
 
 variable "db_instance_name" {
@@ -43,8 +42,18 @@ variable "db_user" {
 }
 
 # Outputs
-output "load_balancer_ip" {
-  value = google_compute_global_address.default.address
+output "cloud_run_url" {
+  description = "The URL of the deployed Cloud Run service"
+  value       = google_cloud_run_service.default.status[0].url
 }
 
+output "load_balancer_ip" {
+  description = "The IP address of the load balancer"
+  value       = google_compute_global_address.default.address
+}
 
+output "database_connection" {
+  description = "The connection name of the database"
+  value       = google_sql_database_instance.main.connection_name
+  sensitive   = true
+}

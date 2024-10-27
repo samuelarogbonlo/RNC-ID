@@ -25,6 +25,22 @@ resource "google_compute_subnetwork" "private" {
   }
 }
 
+# Reserve a global IP address for VPC peering (private services)
+resource "google_compute_global_address" "private_ip_address" {
+  name          = "${var.project_name}-private-ip"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = 16
+  network       = google_compute_network.main.id
+}
+
+# Create VPC peering connection
+resource "google_service_networking_connection" "private_vpc_connection" {
+  network                 = google_compute_network.main.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_ip_address.name]
+}
+
 # Cloud Router for NAT
 resource "google_compute_router" "router" {
   name    = "${var.project_name}-router"
@@ -41,15 +57,37 @@ resource "google_compute_router_nat" "nat" {
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
+# Service Account for Cloud Run
+resource "google_service_account" "cloud_run_sa" {
+  account_id   = "${var.project_name}-run-sa"
+  display_name = "Service Account for Cloud Run"
+}
+
+# Grant Secret Manager Secret Accessor role
+resource "google_project_iam_member" "secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.cloud_run_sa.email}"
+}
+
+# Grant Cloud SQL Client role
+resource "google_project_iam_member" "cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.cloud_run_sa.email}"
+}
+
 # Cloud SQL Instance (PostgreSQL)
 resource "google_sql_database_instance" "main" {
   name             = var.db_instance_name
   database_version = "POSTGRES_16"
   region           = var.region
 
+  depends_on = [google_service_networking_connection.private_vpc_connection]
+
   settings {
-    tier = "db-f1-micro"
-    edition = "ENTERPRISE" 
+    tier    = "db-f1-micro"
+    edition = "ENTERPRISE"
 
     ip_configuration {
       ipv4_enabled    = false
@@ -57,8 +95,8 @@ resource "google_sql_database_instance" "main" {
     }
 
     backup_configuration {
-      enabled     = true
-      start_time  = "02:00"
+      enabled    = true
+      start_time = "02:00"
     }
 
     database_flags {
@@ -104,7 +142,7 @@ resource "google_secret_manager_secret" "db_credentials" {
 }
 
 resource "google_secret_manager_secret_version" "db_credentials" {
-  secret      = google_secret_manager_secret.db_credentials.id
+  secret = google_secret_manager_secret.db_credentials.id
   secret_data = jsonencode({
     username = google_sql_user.user.name
     password = random_password.db_password.result
@@ -113,17 +151,20 @@ resource "google_secret_manager_secret_version" "db_credentials" {
   })
 }
 
+# Additional IAM binding for Secret Manager secret
+resource "google_secret_manager_secret_iam_member" "secret_access" {
+  secret_id = google_secret_manager_secret.db_credentials.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.cloud_run_sa.email}"
+}
+
 # VPC Access Connector for Cloud Run
 resource "google_vpc_access_connector" "connector" {
   name          = "${var.project_name}-connector"
   region        = var.region
   network       = google_compute_network.main.name
-  ip_cidr_range = "10.8.0.0/28" 
+  ip_cidr_range = "10.8.0.0/28"
   
-#   # Specify machine type (optional)
-#   machine_type = "e2-micro"
-  
-  # Minimum and maximum instances (optional)
   min_instances = 2
   max_instances = 3
 }
@@ -135,8 +176,13 @@ resource "google_cloud_run_service" "default" {
 
   template {
     spec {
+      service_account_name = google_service_account.cloud_run_sa.email
+      
       containers {
         image = var.container_image
+        ports {
+          container_port = 80
+        }
 
         env {
           name = "DB_USER"
@@ -182,9 +228,9 @@ resource "google_cloud_run_service" "default" {
 
     metadata {
       annotations = {
-        "autoscaling.knative.dev/maxScale"      = "10"
-        "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.main.connection_name
-        "run.googleapis.com/client-name"        = "terraform"
+        "autoscaling.knative.dev/maxScale"        = "10"
+        "run.googleapis.com/cloudsql-instances"   = google_sql_database_instance.main.connection_name
+        "run.googleapis.com/client-name"          = "terraform"
         "run.googleapis.com/vpc-access-connector" = google_vpc_access_connector.connector.id
         "run.googleapis.com/vpc-access-egress"    = "all-traffic"
       }
@@ -197,6 +243,12 @@ resource "google_cloud_run_service" "default" {
   }
 
   autogenerate_revision_name = true
+
+  depends_on = [
+    google_project_iam_member.secret_accessor,
+    google_project_iam_member.cloudsql_client,
+    google_secret_manager_secret_iam_member.secret_access
+  ]
 }
 
 # IAM - Allow unauthenticated access to Cloud Run
@@ -207,9 +259,10 @@ resource "google_cloud_run_service_iam_member" "public" {
   member   = "allUsers"
 }
 
-# Reserve a global IP address
+# Reserve a global IP address for load balancer (public)
 resource "google_compute_global_address" "default" {
-  name = "${var.project_name}-lb-ip"
+  name       = "${var.project_name}-lb-ip"
+  ip_version = "IPV4"
 }
 
 # URL Map
