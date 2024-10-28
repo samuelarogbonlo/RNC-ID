@@ -5,16 +5,11 @@ A small setup to run a service on Google Cloud.
 ## Requirements
 - Google Cloud SDK
 - Terraform
-- 
 
 ## Steps
 ```sh
-- 
+- terraform apply
 ```
-
-
-At this point, great to see that everything works! Your output shows a successful health check response with the IPFS DAG statistics.
-
 
 # Maintainers
 
